@@ -1,4 +1,3 @@
-<!-- 以下、修正箇所を反映した完全版 HTML / JS です -->
 <!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -427,7 +426,6 @@
       <div class="card-grid" id="my-buildings-grid"></div>
     </div>
 
-    <!-- 追加：他プレイヤー/CPUの建物表示セクション -->
     <div class="section-card" id="other-buildings-section" style="border-color:#78350f; display:none;">
       <div class="section-header">
         <span style="color:#92400e;">🏘️ 他プレイヤー・CPUの所有建物</span>
@@ -869,7 +867,7 @@ function drawCardFromState(st) {
 }
 
 function createGoods() {
-  return { id: 'goods', name: '消費財', cost: 0, vp: 0, tag: '消費財', desc: '（建物効果なし）', sellable: false, isGoods: true, uid: 'g_' + Math.random() };
+  return { id: 'goods', name: '消費財', cost: 0, vp: 0, tag: '消費財', desc: '（建物効果なし）', sellable: false, isGoods: true, uid: 'g_' + Math.random().toString(36).substring(2, 9) };
 }
 
 function getHandLimit(p) {
@@ -1346,7 +1344,7 @@ function hostStartGame() {
 
     const deck = [];
     CARD_SPECS.forEach(spec => {
-      for (let i = 0; i < spec.count; i++) deck.push({ ...spec, uid: `${spec.id}_${i}`, isGoods: false });
+      for (let i = 0; i < spec.count; i++) deck.push({ ...spec, uid: `${spec.id}_${i}_${Math.random().toString(36).substring(2,7)}`, isGoods: false });
     });
     for (let i = deck.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
@@ -1408,17 +1406,24 @@ function humanClickWorkplace(wpIdx, type) {
     advanceTurn(G);
     syncStateToFirebase(G);
     checkAndTriggerCpu();
-  }, () => renderAll());
+  }, () => {
+    document.getElementById('modal-layer').innerHTML = '';
+    renderAll();
+  });
 }
 
 function applyActionEffect(player, wp, isCpu, doneCb, cancelCb = null, aiLogInfo = "") {
   const rnd = G.round, pName = player.name;
   const aiPrefix = isCpu && aiLogInfo ? `${aiLogInfo}\n` : '';
 
-  // 参照整合性を確保
   const actualPlayer = G.players[player.id] || player;
   actualPlayer.hand = ensureArray(actualPlayer.hand);
   actualPlayer.buildings = ensureArray(actualPlayer.buildings);
+
+  // 一意UIDの完全保証
+  actualPlayer.hand.forEach((c, idx) => {
+    if (c && !c.uid) c.uid = `${c.id || 'card'}_${idx}_${Math.random().toString(36).substring(2, 7)}`;
+  });
 
   if (wp.id === 'mine') {
     const c = drawCardFromState(G);
@@ -1451,7 +1456,7 @@ function applyActionEffect(player, wp, isCpu, doneCb, cancelCb = null, aiLogInfo
     const goods = [];
     for (let i = 0; i < count; i++) { const g = createGoods(); actualPlayer.hand.push(g); goods.push(g); }
     if (wp.id === 'burn') {
-      wp.pendingDiscard = true; // 労働者を配置して発動したため破棄フラグを立てる
+      wp.pendingDiscard = true;
     }
     showCardsCutIn(goods, `${wp.name}で消費財獲得！`, pName, actualPlayer.id, false);
     G.logHistory.unshift(`[R${rnd}] 🌾 ${aiPrefix}➡ ${pName} が【${wp.name}】で消費財${count}枚を獲得。`);
@@ -1484,8 +1489,11 @@ function applyActionEffect(player, wp, isCpu, doneCb, cancelCb = null, aiLogInfo
     G.logHistory.unshift(`[R${rnd}] 🏭 ${aiPrefix}➡ ${pName} が【${wp.name}】でカード${count}枚を獲得。`);
     doneCb();
   } else if (wp.id === 'office') {
+    const savedDeck = [...G.deck];
+    const savedDiscard = [...G.discard];
     const pool = [];
     for (let i = 0; i < 5; i++) pool.push(drawCardFromState(G));
+
     if (isCpu) {
       pool.sort((a,b) => b.vp - a.vp);
       const picked = pool.shift();
@@ -1502,7 +1510,12 @@ function applyActionEffect(player, wp, isCpu, doneCb, cancelCb = null, aiLogInfo
         pool.forEach(c => { if (c && !c.isGoods) G.discard.push(c); });
         G.logHistory.unshift(`[R${rnd}] 📐 ${pName} が【設計事務所】で【${picked.name}】を獲得。`);
         doneCb();
-      }, () => { G.deck.push(...pool); if (cancelCb) cancelCb(); });
+      }, () => {
+        G.deck = savedDeck;
+        G.discard = savedDiscard;
+        document.getElementById('modal-layer').innerHTML = '';
+        if (cancelCb) cancelCb();
+      });
     }
   } else if (wp.id === 'factory' || wp.id === 'auto_plant') {
     const req = wp.id === 'factory' ? 2 : 3, gain = wp.id === 'factory' ? 4 : 7;
@@ -1572,18 +1585,15 @@ function applyActionEffect(player, wp, isCpu, doneCb, cancelCb = null, aiLogInfo
       const target = targetList[0];
       const cost = Math.max(0, target.cost - disc);
 
-      // 手札から建設対象を厳密に削除
-      const targetIdx = actualPlayer.hand.findIndex(c => c === target || (c.uid && c.uid === target.uid));
+      const targetIdx = actualPlayer.hand.findIndex(c => c.uid === target.uid);
       if (targetIdx !== -1) actualPlayer.hand.splice(targetIdx, 1);
 
-      // コスト分を捨てる
       actualPlayer.hand.sort((a,b) => (a.isGoods ? 0 : a.vp) - (b.isGoods ? 0 : b.vp));
       for (let i = 0; i < cost; i++) {
         const c = actualPlayer.hand.shift();
         if (c && !c.isGoods) G.discard.push(c);
       }
 
-      // 建物リストに追加
       actualPlayer.buildings.push({ ...target, ownerId: actualPlayer.id, capacity: 1, workers: [] });
       showCardsCutIn([target], "建築完了！", pName, actualPlayer.id, true);
       playBuildSound();
@@ -1594,10 +1604,12 @@ function applyActionEffect(player, wp, isCpu, doneCb, cancelCb = null, aiLogInfo
       showCardSelectModal(`【${wp.name}】建設する建物を選択（割引: -${disc}枚）`, buildables, 1, bSel => {
         const target = buildables[bSel[0]];
         const cost = Math.max(0, target.cost - disc);
-        const handWithout = actualPlayer.hand.filter(c => c !== target);
+        const handWithout = actualPlayer.hand.filter(c => c.uid !== target.uid);
+
         if (cost === 0) {
           playBuildSound();
-          actualPlayer.hand.splice(actualPlayer.hand.indexOf(target), 1);
+          const tIdx = actualPlayer.hand.findIndex(c => c.uid === target.uid);
+          if (tIdx !== -1) actualPlayer.hand.splice(tIdx, 1);
           actualPlayer.buildings.push({ ...target, ownerId: actualPlayer.id, capacity: 1, workers: [] });
           showCardsCutIn([target], "BUILD COMPLETE!", pName, actualPlayer.id, true);
           if (wp.id === 'general_const') actualPlayer.hand.push(drawCardFromState(G), drawCardFromState(G));
@@ -1606,18 +1618,24 @@ function applyActionEffect(player, wp, isCpu, doneCb, cancelCb = null, aiLogInfo
         } else {
           showCardSelectModal(`【${target.name}】のコストとして捨てるカードを ${cost} 枚選択`, handWithout, cost, cSel => {
             playBuildSound();
-            cSel.sort((a,b) => b-a).forEach(idx => {
-              const c = handWithout.splice(idx, 1)[0];
-              actualPlayer.hand.splice(actualPlayer.hand.indexOf(c), 1);
+            const discCards = cSel.map(i => handWithout[i]);
+            discCards.forEach(c => {
+              const cIdx = actualPlayer.hand.findIndex(x => x.uid === c.uid);
+              if (cIdx !== -1) actualPlayer.hand.splice(cIdx, 1);
               if (!c.isGoods) G.discard.push(c);
             });
-            actualPlayer.hand.splice(actualPlayer.hand.indexOf(target), 1);
+            const tIdx = actualPlayer.hand.findIndex(c => c.uid === target.uid);
+            if (tIdx !== -1) actualPlayer.hand.splice(tIdx, 1);
+
             actualPlayer.buildings.push({ ...target, ownerId: actualPlayer.id, capacity: 1, workers: [] });
             showCardsCutIn([target], "BUILD COMPLETE!", pName, actualPlayer.id, true);
             if (wp.id === 'general_const') actualPlayer.hand.push(drawCardFromState(G), drawCardFromState(G));
             G.logHistory.unshift(`[R${rnd}] 🔨 ${pName} が【${target.name}】を建設${wp.id === 'general_const' ? '＆2枚ドロー' : ''}。`);
             doneCb();
-          }, cancelCb);
+          }, () => {
+            document.getElementById('modal-layer').innerHTML = '';
+            if (cancelCb) cancelCb();
+          });
         }
       }, cancelCb);
     }
@@ -1627,7 +1645,7 @@ function applyActionEffect(player, wp, isCpu, doneCb, cancelCb = null, aiLogInfo
       if (!farms.length) { doneCb(); return; }
       farms.sort((a,b) => b.vp - a.vp);
       const target = farms[0];
-      const targetIdx = actualPlayer.hand.findIndex(c => c === target || (c.uid && c.uid === target.uid));
+      const targetIdx = actualPlayer.hand.findIndex(c => c.uid === target.uid);
       if (targetIdx !== -1) actualPlayer.hand.splice(targetIdx, 1);
       actualPlayer.buildings.push({ ...target, ownerId: actualPlayer.id, capacity: 1, workers: [] });
       showCardsCutIn([target], "開拓民で無料建設！", pName, actualPlayer.id, true);
@@ -1638,7 +1656,8 @@ function applyActionEffect(player, wp, isCpu, doneCb, cancelCb = null, aiLogInfo
       showCardSelectModal('【開拓民】無料建設する農園を選択', farms, 1, bSel => {
         playBuildSound();
         const target = farms[bSel[0]];
-        actualPlayer.hand.splice(actualPlayer.hand.indexOf(target), 1);
+        const tIdx = actualPlayer.hand.findIndex(c => c.uid === target.uid);
+        if (tIdx !== -1) actualPlayer.hand.splice(tIdx, 1);
         actualPlayer.buildings.push({ ...target, ownerId: actualPlayer.id, capacity: 1, workers: [] });
         showCardsCutIn([target], "開拓民で無料建設！", pName, actualPlayer.id, true);
         G.logHistory.unshift(`[R${rnd}] 🚜 ${pName} が【開拓民】で【${target.name}】を無料建設！`);
@@ -1655,7 +1674,7 @@ function applyActionEffect(player, wp, isCpu, doneCb, cancelCb = null, aiLogInfo
       const pair = builds.filter(c => c.cost === costNum).slice(0, 2);
       
       pair.forEach(item => {
-        const idx = actualPlayer.hand.findIndex(c => c === item || (c.uid && c.uid === item.uid));
+        const idx = actualPlayer.hand.findIndex(c => c.uid === item.uid);
         if (idx !== -1) actualPlayer.hand.splice(idx, 1);
       });
       actualPlayer.hand.sort((a,b) => (a.isGoods ? 0 : a.vp) - (b.isGoods ? 0 : b.vp));
@@ -1667,23 +1686,57 @@ function applyActionEffect(player, wp, isCpu, doneCb, cancelCb = null, aiLogInfo
       doneCb();
     } else {
       showCardSelectModal('【二胡市建設】同じコストの建物を2つ選択', builds, 2, chosen => {
-        const b1 = builds[chosen[0]], b2 = builds[chosen[1]];
-        if (b1.cost !== b2.cost) { alert('コストが同じ建物を2つ選んでください！'); return; }
-        const cost = b1.cost, handWithout = actualPlayer.hand.filter(c => c !== b1 && c !== b2);
-        showCardSelectModal(`コストとして捨てるカードを ${cost} 枚選択`, handWithout, cost, cSel => {
+        const b1 = builds[chosen[0]];
+        const b2 = builds[chosen[1]];
+
+        if (b1.cost !== b2.cost) {
+          alert('コストが同じ建物を2つ選んでください！');
+          if (cancelCb) cancelCb();
+          return;
+        }
+
+        const cost = b1.cost;
+        if (actualPlayer.hand.length < 2 + cost) {
+          alert(`手札が不足しています（建築対象2枚 + コスト${cost}枚の計${2 + cost}枚必要）。`);
+          if (cancelCb) cancelCb();
+          return;
+        }
+
+        const handWithout = actualPlayer.hand.filter(c => c.uid !== b1.uid && c.uid !== b2.uid);
+
+        const executeBuild = (discardedCards) => {
           playBuildSound();
-          cSel.sort((a,b) => b-a).forEach(idx => {
-            const c = handWithout.splice(idx, 1)[0];
-            actualPlayer.hand.splice(actualPlayer.hand.indexOf(c), 1);
+          discardedCards.forEach(c => {
+            const cIdx = actualPlayer.hand.findIndex(x => x.uid === c.uid);
+            if (cIdx !== -1) actualPlayer.hand.splice(cIdx, 1);
             if (!c.isGoods) G.discard.push(c);
           });
-          actualPlayer.hand.splice(actualPlayer.hand.indexOf(b1), 1);
-          actualPlayer.hand.splice(actualPlayer.hand.indexOf(b2), 1);
-          actualPlayer.buildings.push({ ...b1, ownerId: actualPlayer.id, capacity: 1, workers: [] }, { ...b2, ownerId: actualPlayer.id, capacity: 1, workers: [] });
+
+          const idx1 = actualPlayer.hand.findIndex(c => c.uid === b1.uid);
+          if (idx1 !== -1) actualPlayer.hand.splice(idx1, 1);
+          const idx2 = actualPlayer.hand.findIndex(c => c.uid === b2.uid);
+          if (idx2 !== -1) actualPlayer.hand.splice(idx2, 1);
+
+          actualPlayer.buildings.push(
+            { ...b1, ownerId: actualPlayer.id, capacity: 1, workers: [] },
+            { ...b2, ownerId: actualPlayer.id, capacity: 1, workers: [] }
+          );
           showCardsCutIn([b1, b2], "二胡市建設で2軒同時建築！", pName, actualPlayer.id, true);
           G.logHistory.unshift(`[R${rnd}] 🏗️ ${pName} が【二胡市建設】で【${b1.name}】と【${b2.name}】を同時建設！`);
           doneCb();
-        }, cancelCb);
+        };
+
+        if (cost === 0) {
+          executeBuild([]);
+        } else {
+          showCardSelectModal(`コストとして捨てるカードを ${cost} 枚選択`, handWithout, cost, cSel => {
+            const toDiscard = cSel.map(i => handWithout[i]);
+            executeBuild(toDiscard);
+          }, () => {
+            document.getElementById('modal-layer').innerHTML = '';
+            if (cancelCb) cancelCb();
+          });
+        }
       }, cancelCb);
     }
   } else { doneCb(); }
@@ -1716,12 +1769,14 @@ function checkNextWagePlayer(st) {
       spawnCoinParticles(pBox, document.getElementById('hud-household-box'), 7, p.id, null);
       st.logHistory.unshift(`[R${st.round}] 💵 ${p.name} が給料 $${due} を完納。`);
     } else {
+      // 売却可能な手持ちの建物がある場合は必ず売却フェーズへ移行（負債受取不可）
       const sellables = ensureArray(p.buildings).filter(b => b && b.sellable !== false);
       if (sellables.length > 0) {
         st.phase = 'wage_sell';
         st.turnPlayer = p.id;
         return true;
       } else {
+        // 売却可能な建物が0軒になったときのみ、残額が負債になる
         const unpaid = due - p.money;
         st.household += p.money;
         p.money = 0;
@@ -1729,7 +1784,7 @@ function checkNextWagePlayer(st) {
         p.workers += p.newWorkers;
         p.newWorkers = 0;
         p.wageSettled = true;
-        st.logHistory.unshift(`[R${st.round}] ⚠️ ${p.name} は資金不足で $${unpaid} の負債（-${unpaid * 3}点）。`);
+        st.logHistory.unshift(`[R${st.round}] ⚠️ ${p.name} は資産不足のため $${unpaid} の負債（-${unpaid * 3}点）。`);
         st.lastNotice = { type: 'debt', playerName: p.name, unpaidCount: unpaid, penaltyVp: unpaid * 3, ts: Date.now() };
       }
     }
@@ -1796,16 +1851,15 @@ function humanSellBuilding(bIdx) {
 function finalizeRoundCleanup(st) {
   ensureArray(st.players).forEach(p => { delete p.wageSettled; delete p.discardSettled; });
 
-  // 焼畑：労働者が配置されたもの（発動済み）のみ捨て札へ送って消滅させ、未配置の焼畑は手元に残す
   const cleanBurnWorkplace = (w) => {
     if (w && w.id === 'burn') {
       const isUsed = (w.workers && w.workers.length > 0) || w.pendingDiscard;
       if (isUsed) {
         if (!w.isGoods) st.discard.push(w);
-        return false; // 盤面・手元から削除
+        return false;
       }
     }
-    return true; // 保持
+    return true;
   };
 
   st.publicWorkplaces = ensureArray(st.publicWorkplaces).filter(cleanBurnWorkplace);
@@ -2270,13 +2324,14 @@ function showHumanWageSellModal() {
     return;
   }
 
+  // 売却可能な建物がある限り、必ず売却しなければならない
   document.getElementById('modal-layer').innerHTML = `
     <div class="modal-overlay">
       <div class="modal-box">
         <div class="modal-title" style="color:#b91c1c;">⚠️ 給料が不足しています！</div>
         <div style="font-size:0.85rem; margin-bottom:8px;">
           必要賃金: <strong>$${due}</strong> (現在資金: <strong>$${p.money}</strong>) / 不足額: <strong style="color:#dc2626; font-size:1rem;">$${deficit}</strong>
-          <br><span style="font-size:0.75rem; color:#666;">※ 給料の全額に達するまで順番に建物を売却してください。</span>
+          <br><span style="font-size:0.75rem; color:#666;">※ 売却可能な建物がある限り、必ず売却して給料を支払う必要があります（売却可能な建物を全て売却しても不足する場合のみ、残額が自動的に負債となります）。</span>
         </div>
         <div class="modal-cards">
           ${sellables.map((b, i) => `
@@ -2297,17 +2352,28 @@ function showHumanHandDiscardModal() {
   const p = G.players[mySeatIndex];
   if (!p) return;
   const limit = getHandLimit(p), excess = p.hand.length - limit;
-  if (excess <= 0) { p.discardSettled = true; activePhaseModal = null; proceedPhaseOnline(G); return; }
+  if (excess <= 0) {
+    p.discardSettled = true;
+    activePhaseModal = null;
+    proceedPhaseOnline(G);
+    return;
+  }
 
   showCardSelectModal(`手札上限超過！捨てるカードを ${excess} 枚選択 (上限:${limit}枚)`, p.hand, excess, chosen => {
-    chosen.sort((a, b) => b - a).forEach(idx => { const c = p.hand.splice(idx, 1)[0]; if (c && !c.isGoods) G.discard.push(c); });
-    p.discardSettled = true; activePhaseModal = null;
+    chosen.sort((a, b) => b - a).forEach(idx => {
+      const c = p.hand.splice(idx, 1)[0];
+      if (c && !c.isGoods) G.discard.push(c);
+    });
+    p.discardSettled = true;
+    activePhaseModal = null;
     G.logHistory.unshift(`[R${G.round}] 🎴 ${p.name} が手札超過分 ${excess} 枚を捨てました。`);
     playCardSound();
+    
+    syncStateToFirebase(G);
     proceedPhaseOnline(G);
     renderAll();
     checkAndTriggerCpu();
-  });
+  }, null);
 }
 
 function showCardSelectModal(title, cards, requiredCount, onConfirm, onCancel = null) {
