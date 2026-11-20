@@ -894,8 +894,9 @@ function canUseWorkplace(p, wp) {
 
   const dorms = ensureArray(p.buildings).filter(b => b && b.id === 'dormitory').length;
   const tw = p.workers + p.newWorkers;
-  if (wp.id === 'school' || wp.id === 'high_school') return tw < (4 + dorms);
-  if (wp.id === 'university' || wp.id === 'vocational_school') return tw < (5 + dorms);
+  if (wp.id === 'high_school') return tw < 4;
+  if (wp.id === 'university') return tw < 5;
+  if (wp.id === 'school' || wp.id === 'vocational_school') return tw < (5 + dorms);
 
   const hand = ensureArray(p.hand);
   if (wp.id === 'orchard') return hand.length <= 3;
@@ -973,19 +974,37 @@ function cpuTurnAdvanced(cpu) {
     const isBuildWp = (id) => ['carpenter', 'const_co', 'general_const', 'settler', 'niko_const'].includes(id);
     const isEngineCard = (id) => ['factory', 'auto_plant', 'steelworks', 'farm', 'plantation', 'orchard', 'office'].includes(id);
 
-    const getPossibleBuildTargets = () => {
+    const passiveIds = ['dormitory', 'warehouse', 'law_firm', 'real_estate', 'agr_coop', 'labor_union', 'headquarters', 'railway', 'mansion'];
+    const getPossibleBuildTargets = (disc = 0) => {
       return cpu.hand.filter(c => {
         if (!c || c.isGoods) return false;
-        return (cpu.hand.length - 1 >= c.cost);
+        if (rnd <= 2 && passiveIds.includes(c.id)) return false; // 序盤(R1-2)は社宅や倉庫・パッシブ施設を建設対象にしない
+        return (cpu.hand.length - 1 >= Math.max(0, c.cost - disc));
       });
     };
 
-    const buildableTargets = getPossibleBuildTargets();
-    let bestBuildTarget = null;
-    let canSolventBuild = false;
+    const totalBuffer = cpu.money + cpu.buildings.filter(b => b.sellable !== false).reduce((sum, b) => sum + b.vp, 0);
+    const hasWageMargin = (totalBuffer >= upcomingWage || remTurns > 1 || rnd <= 3);
 
-    if (buildableTargets.length > 0) {
-      buildableTargets.sort((a,b) => {
+    const pickBestBuildForWp = (wpId) => {
+      if (wpId === 'settler') {
+        const farms = cpu.hand.filter(c => !c.isGoods && ['farm', 'burn', 'orchard', 'plantation'].includes(c.id));
+        farms.sort((a, b) => b.vp - a.vp);
+        return farms[0] || null;
+      }
+      if (wpId === 'niko_const') {
+        const cg = {};
+        cpu.hand.filter(c => !c.isGoods && !(rnd <= 2 && passiveIds.includes(c.id))).forEach(c => cg[c.cost] = (cg[c.cost] || 0) + 1);
+        const validCost = Object.keys(cg).find(cost => cg[cost] >= 2 && cpu.hand.length >= 2 + parseInt(cost, 10));
+        if (!validCost) return null;
+        const pair = cpu.hand.filter(c => !c.isGoods && c.cost === parseInt(validCost, 10));
+        pair.sort((a, b) => b.vp - a.vp);
+        return pair[0] || null;
+      }
+      const disc = (wpId === 'const_co') ? 1 : 0;
+      const targets = getPossibleBuildTargets(disc);
+      if (!targets.length) return null;
+      targets.sort((a, b) => {
         if (rnd <= 4) {
           const aEng = isEngineCard(a.id) ? 1 : 0;
           const bEng = isEngineCard(b.id) ? 1 : 0;
@@ -993,13 +1012,8 @@ function cpuTurnAdvanced(cpu) {
         }
         return b.vp - a.vp;
       });
-      bestBuildTarget = buildableTargets[0];
-
-      const totalBuffer = cpu.money + cpu.buildings.filter(b => b.sellable !== false).reduce((sum, b) => sum + b.vp, 0);
-      if (totalBuffer >= upcomingWage || remTurns > 1 || rnd <= 3) {
-        canSolventBuild = true;
-      }
-    }
+      return targets[0];
+    };
 
     const isEvenRound = [2, 4, 6, 8].includes(rnd);
     let quarryPriorityTier = (rnd === 9) ? "不要（最終Rのため禁止）" : (isEvenRound ? "極めて高い（次R新施設・スタP確保）" : "中");
@@ -1016,24 +1030,33 @@ function cpuTurnAdvanced(cpu) {
         cand.score = -999999; return;
       }
 
-      if (rnd <= 2 && w.id === 'school') {
-        score = 980000;
-        tag = `【最速増員】家計への賃金供給量を増やし、好景気の基盤を作るため学校を利用。`;
-      } else if (rnd >= 3 && rnd <= 6 && ['high_school', 'university'].includes(w.id)) {
-        score = 950000;
-        tag = `【積極的雇用拡大】労働力を拡充し、毎ラウンド大量の賃金を家計へ循環。`;
-      } else if (isBuildWp(w.id) && canSolventBuild && bestBuildTarget) {
+      const wpBuildTarget = isBuildWp(w.id) ? pickBestBuildForWp(w.id) : null;
+
+      if (rnd <= 7 && ['school', 'high_school', 'university'].includes(w.id)) {
+        // 偶数ラウンドに限らず全ラウンド(R1〜R7)で学校の優先度を高く設定（給料支払い余力がある場合）
+        const canAffordNextWage = (cpu.money + cpu.buildings.filter(b => b.sellable !== false).reduce((s, b) => s + b.vp, 0) >= (totalWorkers + 1) * wagePerWorker) || rnd <= 3;
+        if (canAffordNextWage) {
+          score = (rnd <= 2) ? 985000 : 955000;
+          tag = `【積極的雇用拡大】偶数Rに限らず早期に労働力を増やし、行動回数と家計への賃金供給を拡大。`;
+        } else {
+          score = 720000;
+          tag = `【雇用検討】労働者増員による手数拡大を狙う。`;
+        }
+      } else if (w.id === 'vocational_school' && rnd <= 8) {
+        score = 960000;
+        tag = `【即戦力雇用】専門学校で即座に手数を増やす。`;
+      } else if (isBuildWp(w.id) && hasWageMargin && wpBuildTarget) {
         const discBonus = (w.id === 'general_const' || w.id === 'const_co') ? 40000 : 0;
-        const engineBonus = isEngineCard(bestBuildTarget.id) ? 60000 : 0;
+        const engineBonus = isEngineCard(wpBuildTarget.id) ? 60000 : 0;
         if (rnd === 9) {
-          score = 990000 + bestBuildTarget.vp * 250;
-          tag = `【最終Rの最高打点建設】手札の【${bestBuildTarget.name}】(${bestBuildTarget.vp}VP)を着工してVP確定。`;
+          score = 990000 + wpBuildTarget.vp * 250;
+          tag = `【最終Rの最高打点建設】手札の【${wpBuildTarget.name}】(${wpBuildTarget.vp}VP)を着工してVP確定。`;
         } else if (rnd <= 4) {
           score = 920000 + engineBonus + discBonus;
-          tag = `【エンジン建設】手札・リソースの爆発的供給源となる【${bestBuildTarget.name}】を着工。`;
+          tag = `【エンジン建設】手札・リソースの爆発的供給源となる【${wpBuildTarget.name}】を着工。`;
         } else {
-          score = 880000 + bestBuildTarget.vp * 200 + discBonus;
-          tag = `【高打点施設建設】盤面に【${bestBuildTarget.name}】(${bestBuildTarget.vp}VP)を建設。`;
+          score = 880000 + wpBuildTarget.vp * 200 + discBonus;
+          tag = `【高打点施設建設】盤面に【${wpBuildTarget.name}】(${wpBuildTarget.vp}VP)を建設。`;
         }
       } else if (['auto_plant', 'steelworks', 'factory', 'chem_factory'].includes(w.id)) {
         if (cpu.hand.length <= 4) {
@@ -1503,19 +1526,14 @@ function applyActionEffect(player, wp, isCpu, doneCb, cancelCb = null, aiLogInfo
       G.logHistory.unshift(`[R${rnd}] 📐 ${aiPrefix}➡ ${pName} が【設計事務所】でカードを獲得。`);
       doneCb();
     } else {
-      showCardSelectModal('【設計事務所】獲得するカードを1枚選択', pool, 1, chosen => {
+      showCardSelectModal('【設計事務所】獲得するカードを1枚選択（山札を見たためキャンセル不可）', pool, 1, chosen => {
         const picked = pool.splice(chosen[0], 1)[0];
         actualPlayer.hand.push(picked);
         showCardsCutIn([picked], "設計事務所で獲得！", pName, actualPlayer.id, false);
         pool.forEach(c => { if (c && !c.isGoods) G.discard.push(c); });
         G.logHistory.unshift(`[R${rnd}] 📐 ${pName} が【設計事務所】で【${picked.name}】を獲得。`);
         doneCb();
-      }, () => {
-        G.deck = savedDeck;
-        G.discard = savedDiscard;
-        document.getElementById('modal-layer').innerHTML = '';
-        if (cancelCb) cancelCb();
-      });
+      }, null);
     }
   } else if (wp.id === 'factory' || wp.id === 'auto_plant') {
     const req = wp.id === 'factory' ? 2 : 3, gain = wp.id === 'factory' ? 4 : 7;
@@ -1574,12 +1592,28 @@ function applyActionEffect(player, wp, isCpu, doneCb, cancelCb = null, aiLogInfo
     const buildables = actualPlayer.hand.filter(c => !c.isGoods && (actualPlayer.hand.length - 1 >= Math.max(0, c.cost - disc)));
     if (isCpu) {
       let targetList = buildables;
-      if (rnd <= 2) {
-        const engines = buildables.filter(c => ['office', 'factory', 'steelworks', 'farm', 'orchard'].includes(c.id));
-        targetList = engines.length ? engines : [];
+      if (rnd <= 3) {
+        // ラウンド1〜3は資源・手札を直接生み出すエンジン建物を最優先（社宅や倉庫などの初手建設を防ぐ）
+        const engines = buildables.filter(c => ['office', 'factory', 'auto_plant', 'steelworks', 'chem_factory', 'farm', 'plantation', 'orchard', 'burn'].includes(c.id));
+        const nonPassive = buildables.filter(c => !['dormitory', 'warehouse', 'law_firm', 'real_estate', 'agr_coop', 'labor_union', 'headquarters', 'railway', 'mansion'].includes(c.id));
+        if (engines.length) {
+          targetList = engines;
+        } else if (nonPassive.length) {
+          targetList = nonPassive;
+        } else if (rnd === 1) {
+          // 1ラウンド目は社宅・倉庫・終了時ボーナス等のパッシブ建物を建てない
+          targetList = [];
+        }
       }
-      if (!targetList.length) targetList = buildables;
-      if (!targetList.length) { doneCb(); return; }
+      if (!targetList.length) {
+        // 建築見送り時はカード1枚ドローにフォールバックし、行動無駄撃ちを防ぐ
+        const c = drawCardFromState(G);
+        actualPlayer.hand.push(c);
+        showCardsCutIn([c], "計画変更・カード獲得！", pName, actualPlayer.id, false);
+        G.logHistory.unshift(`[R${rnd}] 🔨 ${aiPrefix}➡ ${pName} は建築を見送り、資材調達（1枚ドロー）を行いました。`);
+        doneCb();
+        return;
+      }
 
       targetList.sort((a,b) => b.vp - a.vp);
       const target = targetList[0];
@@ -2071,7 +2105,8 @@ function renderAll() {
       const left = p.workers - p.placedWorkers;
 
       const spots = [];
-      [...(G.publicWorkplaces || []), ...(G.soldWorkplaces || []), ...(p.buildings || [])].forEach(w => {
+      const allPlayerBuildings = (G.players || []).flatMap(pl => ensureArray(pl && pl.buildings));
+      [...(G.publicWorkplaces || []), ...(G.soldWorkplaces || []), ...allPlayerBuildings].forEach(w => {
         if (!w) return;
         const c = ensureArray(w.workers).filter(x => x === p.id).length;
         for (let i = 0; i < c; i++) spots.push(w.name);
