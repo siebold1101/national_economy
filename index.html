@@ -928,6 +928,52 @@ function advanceTurn(st) {
 // ==========================================
 // 6. 最新・超上級インフレ経済牽引型AI
 // ==========================================
+const PASSIVE_BUILDING_IDS = ['dormitory', 'warehouse', 'law_firm', 'real_estate', 'agr_coop', 'labor_union', 'headquarters', 'railway', 'mansion'];
+const ENGINE_BUILDING_IDS = ['factory', 'auto_plant', 'steelworks', 'chem_factory', 'farm', 'plantation', 'orchard', 'office'];
+
+function calcEffectiveVp(card, cpu, rnd = 9) {
+  if (!card || card.isGoods) return 0;
+  const totalWorkers = (cpu.workers || 2) + (cpu.newWorkers || 0);
+  const blds = ensureArray(cpu.buildings);
+  const hand = ensureArray(cpu.hand);
+  let vp = card.vp || 0;
+
+  if (card.id === 'labor_union') {
+    vp += totalWorkers * 6;
+  } else if (card.id === 'railway') {
+    const ownedFactories = blds.filter(b => b && b.tag === '工場').length;
+    const handFactories = hand.filter(c => c && c.uid !== card.uid && c.tag === '工場').length;
+    vp += (ownedFactories + Math.min(2, handFactories) * 0.5) * 8;
+  } else if (card.id === 'real_estate') {
+    const remRounds = Math.max(0, 9 - rnd);
+    vp += (blds.length + 1 + remRounds * 0.6) * 3;
+  } else if (card.id === 'headquarters') {
+    const ownedUnsellable = blds.filter(b => b && b.sellable === false).length;
+    const handUnsellable = hand.filter(c => c && c.uid !== card.uid && !c.isGoods && c.sellable === false).length;
+    vp += (ownedUnsellable + 1 + Math.min(2, handUnsellable) * 0.4) * 6;
+  } else if (card.id === 'agr_coop') {
+    const goodsCount = hand.filter(c => c && c.isGoods).length;
+    vp += goodsCount * 3;
+  }
+  return vp;
+}
+
+function getDiscardPriority(card, cpu, rnd) {
+  if (!card) return -1;
+  if (card.isGoods) return 0;
+  let val = calcEffectiveVp(card, cpu, rnd);
+  if (rnd <= 4 && card.cost <= 2 && ENGINE_BUILDING_IDS.includes(card.id)) {
+    val += 10;
+  }
+  if (rnd <= 4 && ['const_co', 'cafe'].includes(card.id)) {
+    val += 6;
+  }
+  if (rnd >= 4 && ['niko_const', 'general_const', 'auto_plant', 'steelworks', 'chem_factory'].includes(card.id)) {
+    val += 8;
+  }
+  return val;
+}
+
 function cpuTurnAdvanced(cpu) {
   try {
     if (!cpu) return;
@@ -942,7 +988,6 @@ function cpuTurnAdvanced(cpu) {
     cpu.buildings = ensureArray(cpu.buildings);
     cpu.hand = ensureArray(cpu.hand);
 
-    // 思考側と実行側でカードUIDを100%一致させるため事前にUIDを保証
     cpu.hand.forEach((c, idx) => {
       if (c && !c.uid) c.uid = `${c.id || 'card'}_${idx}_${Math.random().toString(36).substring(2, 7)}`;
     });
@@ -976,7 +1021,6 @@ function cpuTurnAdvanced(cpu) {
       return G.household >= sp.rate ? sp.rate : 0;
     };
 
-    // 現在使える換金所からの最大現金回収額を事前計算（資金繰り判断に使用）
     let maxAvailableCashGain = 0;
     candidates.forEach(c => {
       const g = getExactCashGain(c.wp.id, cpu.hand.length);
@@ -987,17 +1031,12 @@ function cpuTurnAdvanced(cpu) {
     const totalBuffer = cpu.money + sellableVp;
 
     const isBuildWp = (id) => ['carpenter', 'const_co', 'general_const', 'settler', 'niko_const'].includes(id);
-    const isEngineCard = (id) => ['factory', 'auto_plant', 'steelworks', 'chem_factory', 'farm', 'plantation', 'orchard', 'office'].includes(id);
-    const passiveIds = ['dormitory', 'warehouse', 'law_firm', 'real_estate', 'agr_coop', 'labor_union', 'headquarters', 'railway', 'mansion'];
 
-    // 建物単体の建設可否（序盤パッシブ抑制 & 売却不可建物による自爆負債防止）
+    // 序盤(R1〜R4)は配置不可のパッシブ施設を建てず、ワーカー配置先と売却バッファを確保する
     const isAllowedToBuildCard = (c) => {
       if (!c || c.isGoods) return false;
-      // R1〜R2は社宅・倉庫・終了時ボーナスなどのパッシブ施設を建設しない
-      if (rnd <= 2 && passiveIds.includes(c.id)) return false;
-      // R3も給料支払い余力があり所有建物が1軒以上ある場合以外はパッシブ施設を避ける
-      if (rnd === 3 && passiveIds.includes(c.id) && !(cpu.money >= upcomingWage && cpu.buildings.length >= 1)) return false;
-      // 売却不可の建物（焼畑やパッシブ等）は、建てても給料を払える見込みがある時のみ許可
+      if (rnd <= 4 && PASSIVE_BUILDING_IDS.includes(c.id)) return false;
+      if (rnd === 5 && PASSIVE_BUILDING_IDS.includes(c.id) && !(cpu.money >= upcomingWage && cpu.buildings.length >= 2)) return false;
       if (c.sellable === false) {
         const futureCashHope = (remTurns >= 2 && G.household >= 6) ? Math.min(G.household, 12) : 0;
         if (totalBuffer + futureCashHope < upcomingWage) return false;
@@ -1005,13 +1044,36 @@ function cpuTurnAdvanced(cpu) {
       return true;
     };
 
+    const hasRailway = cpu.buildings.some(b => b && b.id === 'railway');
+    const hasRealEstate = cpu.buildings.some(b => b && b.id === 'real_estate');
+    const hasHeadquarters = cpu.buildings.some(b => b && b.id === 'headquarters');
+
+    const evaluateSingleCardForBuild = (c) => {
+      let val = calcEffectiveVp(c, cpu, rnd);
+      if (hasRailway && c.tag === '工場') val += 8;
+      if (hasRealEstate) val += 3;
+      if (hasHeadquarters && c.sellable === false) val += 6;
+
+      let engBonus = 0;
+      if (rnd <= 4) {
+        if (ENGINE_BUILDING_IDS.includes(c.id)) engBonus += 12;
+        if (['const_co', 'cafe'].includes(c.id)) engBonus += 8;
+      } else if (rnd <= 7) {
+        if (c.id === 'niko_const') engBonus += 16;
+        else if (c.id === 'general_const') engBonus += 14;
+        else if (['auto_plant', 'steelworks', 'chem_factory'].includes(c.id)) engBonus += 12;
+      }
+      return { effVp: val, engineBonus: engBonus, totalScore: val + engBonus };
+    };
+
     const pickBestBuildPlanForWp = (wpId) => {
       if (wpId === 'settler') {
         const farms = cpu.hand.filter(c => isAllowedToBuildCard(c) && ['farm', 'burn', 'orchard', 'plantation'].includes(c.id));
         if (!farms.length) return null;
-        farms.sort((a, b) => (b.sellable !== false ? 1 : 0) - (a.sellable !== false ? 1 : 0) || b.vp - a.vp);
+        farms.sort((a, b) => (b.sellable !== false ? 1 : 0) - (a.sellable !== false ? 1 : 0) || evaluateSingleCardForBuild(b).totalScore - evaluateSingleCardForBuild(a).totalScore);
         const t = farms[0];
-        return { targets: [t], primary: t, totalVp: t.vp, label: `【${t.name}】` };
+        const ev = evaluateSingleCardForBuild(t);
+        return { targets: [t], primary: t, totalVp: ev.effVp, engineBonus: ev.engineBonus, label: `【${t.name}】` };
       }
       if (wpId === 'niko_const') {
         const validCards = cpu.hand.filter(c => isAllowedToBuildCard(c));
@@ -1020,37 +1082,41 @@ function cpuTurnAdvanced(cpu) {
         const validCosts = Object.keys(cg).filter(cost => cg[cost] >= 2 && cpu.hand.length >= 2 + parseInt(cost, 10));
         if (!validCosts.length) return null;
         let bestPair = null;
-        let bestPairVp = -1;
+        let bestPairScore = -1;
+        let bestPairVp = 0;
+        let bestPairEng = 0;
         validCosts.forEach(costStr => {
           const costNum = parseInt(costStr, 10);
-          const group = validCards.filter(c => c.cost === costNum).sort((a, b) => b.vp - a.vp);
+          const group = validCards.filter(c => c.cost === costNum).sort((a, b) => evaluateSingleCardForBuild(b).totalScore - evaluateSingleCardForBuild(a).totalScore);
           const pair = group.slice(0, 2);
-          const sumVp = pair[0].vp + pair[1].vp;
-          if (sumVp > bestPairVp) {
-            bestPairVp = sumVp;
+          const ev0 = evaluateSingleCardForBuild(pair[0]);
+          const ev1 = evaluateSingleCardForBuild(pair[1]);
+          const sumScore = ev0.totalScore + ev1.totalScore;
+          if (sumScore > bestPairScore) {
+            bestPairScore = sumScore;
+            bestPairVp = ev0.effVp + ev1.effVp;
+            bestPairEng = ev0.engineBonus + ev1.engineBonus;
             bestPair = pair;
           }
         });
         if (!bestPair) return null;
-        return { targets: bestPair, primary: bestPair[0], totalVp: bestPairVp, label: `【${bestPair[0].name}】＋【${bestPair[1].name}】` };
+        return { targets: bestPair, primary: bestPair[0], totalVp: bestPairVp, engineBonus: bestPairEng, label: `【${bestPair[0].name}】＋【${bestPair[1].name}】` };
       }
       const disc = (wpId === 'const_co') ? 1 : 0;
       const targets = cpu.hand.filter(c => isAllowedToBuildCard(c) && (cpu.hand.length - 1 >= Math.max(0, c.cost - disc)));
       if (!targets.length) return null;
-      targets.sort((a, b) => {
-        if (rnd <= 4) {
-          const aEng = isEngineCard(a.id) ? 1 : 0;
-          const bEng = isEngineCard(b.id) ? 1 : 0;
-          if (aEng !== bEng) return bEng - aEng;
-        }
-        return b.vp - a.vp;
-      });
+      targets.sort((a, b) => evaluateSingleCardForBuild(b).totalScore - evaluateSingleCardForBuild(a).totalScore);
       const t = targets[0];
-      return { targets: [t], primary: t, totalVp: t.vp, label: `【${t.name}】` };
+      const ev = evaluateSingleCardForBuild(t);
+      return { targets: [t], primary: t, totalVp: ev.effVp, engineBonus: ev.engineBonus, label: `【${t.name}】` };
     };
 
     const isEvenRound = [2, 4, 6, 8].includes(rnd);
     let quarryPriorityTier = (rnd === 9) ? "不要（最終Rのため禁止）" : (isEvenRound ? "極めて高い（次R新施設・スタP確保）" : "中");
+
+    // 設計事務所の例外発火判定用
+    const hasEarlyAffordableEngine = cpu.hand.some(c => c && !c.isGoods && c.cost <= 2 && (ENGINE_BUILDING_IDS.includes(c.id) || ['const_co', 'cafe'].includes(c.id)));
+    const hasLateFinisher = cpu.hand.some(c => c && !c.isGoods && calcEffectiveVp(c, cpu, rnd) >= 18);
 
     candidates.forEach(cand => {
       const w = cand.wp;
@@ -1069,7 +1135,6 @@ function cpuTurnAdvanced(cpu) {
         return;
       }
 
-      // 手札上限時：採石場(R1〜R8)はスタP奪取の価値があるため除外せず、他の純粋ドロー系のみ抑制
       if (cpu.hand.length >= handLimit && ['mine', 'farm', 'plantation', 'steelworks', 'chem_factory', 'burn'].includes(w.id)) {
         cand.score = (w.id === 'mine') ? -950000 : -900000;
         cand.strategyTag = `【手札上限】手札上限(${handLimit}枚)のためドロー職場の優先度を抑制。`;
@@ -1079,6 +1144,9 @@ function cpuTurnAdvanced(cpu) {
       const buildPlan = isBuildWp(w.id) ? pickBestBuildPlanForWp(w.id) : null;
       cand.buildPlan = buildPlan;
 
+      // 定員1の希少枠ボーナス（競合に取られる前に確保）
+      const scarcityBonus = (w.capacity === 1 && w.id !== 'mine') ? 25000 : 0;
+
       if (rnd <= 7 && ['school', 'high_school', 'university'].includes(w.id)) {
         const addCount = w.id === 'high_school' ? Math.max(0, 4 - totalWorkers)
                        : w.id === 'university' ? Math.max(0, 5 - totalWorkers)
@@ -1087,17 +1155,20 @@ function cpuTurnAdvanced(cpu) {
 
         let canAffordNextWage = false;
         if (rnd === 1) {
-          // R1は換金所も家計もないため、初期現金+所有建物で増員後給料($6)を賄える場合（2番手以降など）に最優先
           canAffordNextWage = (totalBuffer >= nextWage);
         } else {
-          // R2以降は現資産で賄えるか、残り手番で確実に換金回収できる見込みがある場合のみ高優先
           const projectedCash = (remTurns >= 2 && maxAvailableCashGain > 0) ? maxAvailableCashGain : 0;
           canAffordNextWage = (totalBuffer + projectedCash >= nextWage);
         }
 
         if (canAffordNextWage) {
-          score = (rnd <= 2) ? 985000 : 955000;
-          tag = `【積極的雇用拡大】支払い余力を確認のうえ早期に労働力を増やし、行動回数と家計への賃金供給を拡大。`;
+          if (w.id === 'high_school' || w.id === 'university') {
+            score = 992000;
+            tag = `【上位教育機関の独占雇用】定員1の【${w.name}】を押さえて労働力を大幅拡大。`;
+          } else {
+            score = (rnd <= 2) ? 985000 : 960000;
+            tag = `【積極的雇用拡大】支払い余力を確認のうえ早期に労働力を増やし、行動回数と家計への賃金供給を拡大。`;
+          }
         } else {
           score = (rnd === 1) ? 400000 : 600000;
           tag = `【雇用保留（資金優先）】増員すると給料($${nextWage})不足・負債リスクが高いため資金確保を優先。`;
@@ -1106,7 +1177,7 @@ function cpuTurnAdvanced(cpu) {
         const nextWage = (totalWorkers + 1) * wagePerWorker;
         const projectedCash = (remTurns >= 1 && G.household >= 12) ? 12 : 0;
         if (totalBuffer + projectedCash >= nextWage) {
-          score = 960000;
+          score = 975000;
           tag = `【即戦力雇用】専門学校で即座に手数を増やす。`;
         } else {
           score = 620000;
@@ -1117,7 +1188,6 @@ function cpuTurnAdvanced(cpu) {
         if (gain > 0) {
           if (currentDeficit > 0) {
             if (gain >= 12) {
-              // 給料不足時の大型換金は、中盤の建設やドローより最優先して建物の無駄売りを防ぐ
               score = 970000 + gain * 300;
               tag = `【最優先：給料大型換金】給料不足($${currentDeficit})を解消し建物売却を防ぐため家計から$${gain}を回収。`;
             } else if (remTurns <= 2 || maxAvailableCashGain < 12) {
@@ -1152,44 +1222,58 @@ function cpuTurnAdvanced(cpu) {
           score = 450000;
           tag = `【建設保留】給料支払い余力が不足しているため建設の優先度を低下。`;
         } else {
-          const discBonus = (w.id === 'general_const' || w.id === 'const_co' || w.id === 'niko_const') ? 40000 : 0;
-          const engineBonus = isEngineCard(buildPlan.primary.id) ? 60000 : 0;
+          // 建設職場の序列: 二胡市建設 > ゼネコン(2ドロー) > 建設会社(-1コスト) > 開拓民 > 大工
+          const wpRankBonus = (w.id === 'niko_const') ? 55000
+                            : (w.id === 'general_const') ? 45000
+                            : (w.id === 'const_co') ? 25000
+                            : (w.id === 'settler') ? 20000
+                            : 0;
+
           if (rnd === 9) {
-            score = 990000 + buildPlan.totalVp * 250;
-            tag = `【最終Rの最高打点建設】手札の${buildPlan.label}(${buildPlan.totalVp}VP)を着工してVP確定。`;
+            score = 990000 + buildPlan.totalVp * 300 + wpRankBonus;
+            tag = `【最終Rの最高打点建設】手札の${buildPlan.label}(実質${buildPlan.totalVp}VP)を着工してVP確定。`;
           } else if (rnd <= 4) {
-            score = 920000 + engineBonus + discBonus + buildPlan.totalVp * 100;
+            score = 920000 + buildPlan.engineBonus * 4000 + wpRankBonus + buildPlan.totalVp * 150;
             tag = `【エンジン建設】手札・リソースの供給源となる${buildPlan.label}を着工。`;
           } else {
-            score = 880000 + buildPlan.totalVp * 200 + discBonus;
-            tag = `【高打点施設建設】盤面に${buildPlan.label}(${buildPlan.totalVp}VP)を建設。`;
+            score = 900000 + buildPlan.totalVp * 250 + buildPlan.engineBonus * 2500 + wpRankBonus;
+            tag = `【高打点・上位施設建設】盤面に${buildPlan.label}(実質${buildPlan.totalVp}VP)を建設。`;
           }
         }
       } else if (['auto_plant', 'steelworks', 'factory', 'chem_factory'].includes(w.id)) {
+        const netDrawBonus = (w.id === 'auto_plant') ? 4000
+                           : (w.id === 'chem_factory' && cpu.hand.length === 0) ? 4000
+                           : (w.id === 'steelworks') ? 3000
+                           : 2000;
         if (cpu.hand.length <= 4) {
-          score = 900000;
+          score = 905000 + netDrawBonus;
           tag = `【手札爆発ドロー】上位換金所や建設コストを満たすため【${w.name}】で大量獲得。`;
         } else {
           score = 150000;
           tag = `【手札入れ替え】手札の質を高めるため【${w.name}】を利用。`;
         }
       } else if (['farm', 'plantation', 'burn', 'orchard'].includes(w.id) && cpu.hand.length <= 3) {
-        score = 870000;
+        score = 875000;
         tag = `【消費財確保】換金所での一括高額売却・建設原資として消費財を調達。`;
       } else if (w.id === 'quarry' && isEvenRound && rnd < 9 && remTurns <= 2) {
-        score = 840000;
+        score = 845000;
         tag = `【次ラウンド初手予約（採石場）】次Rの新設換金所・インフラを初手で独占するためスタP奪取。`;
-      } else if (w.id === 'office' && cpu.hand.length <= 3) {
-        score = 820000;
-        tag = `【燃料補給】山札から重要施設・エンジンカードを探索。`;
+      } else if (w.id === 'office') {
+        if (rnd <= 3 && !hasEarlyAffordableEngine && cpu.hand.length < handLimit) {
+          score = 830000;
+          tag = `【事故回避の設計事務所】手札に序盤エンジンがないため山札から探索。`;
+        } else if (rnd >= 7 && cpu.hand.length >= 4 && !hasLateFinisher && cpu.hand.length < handLimit) {
+          score = 860000;
+          tag = `【終盤タマ探しの設計事務所】建築コストはあるがフィニッシャー不足のため5枚から探索。`;
+        } else {
+          score = 450000;
+          tag = `【カード厳選（鉱山上位）】他に優先行動がないため設計事務所で有力カードを確保。`;
+        }
       } else if (w.id === 'quarry' && rnd < 9) {
         score = (cpu.hand.length < handLimit) ? 650000 : 500000;
         tag = (cpu.hand.length < handLimit)
           ? `【状況打開の採石場】スタPを狙いつつドロー。`
           : `【手札上限時のスタP確保】手札上限だが鉱山より有利な採石場で次RスタPを確保。`;
-      } else if (w.id === 'office') {
-        score = 350000;
-        tag = `【カード厳選】設計事務所で有力カードを確保。`;
       } else {
         if (w.id === 'mine') {
           score = (cpu.hand.length === 0 ? 300000 : 10);
@@ -1200,7 +1284,7 @@ function cpuTurnAdvanced(cpu) {
         }
       }
 
-      cand.score = score;
+      cand.score = score + (score > 400000 ? scarcityBonus : 0);
       cand.strategyTag = tag;
     });
 
@@ -1219,8 +1303,11 @@ function cpuTurnAdvanced(cpu) {
     cpu.placedWorkers++;
 
     const finalTag = bestCand.strategyTag || bestCand.tag || '【最低限の繋ぎ】空き職場を利用。';
-    const aiLog = `【盤面・財務】手持ち: $${cpu.money} / 必要給料: $${upcomingWage} / 家計残高: $${G.household} / 手札: ${cpu.hand.length}枚\n【スタP状況】現在スタP: ${curStartName} / 採石場狙い度: ${quarryPriorityTier}\n【思考】${finalTag}`;
-    recordTrace(`超上級インフレAI (${cpu.name}) 決定: ${chosen.name} [Score:${bestCand.score}]\n${aiLog}`);
+    const aiLog = `【盤面・財務】手持ち: $${cpu.money} / 必要給料: $${upcomingWage} / 家計残高: $${G.household} / 手札: ${cpu.hand.length}枚
+【スタP状況】現在スタP: ${curStartName} / 採石場狙い度: ${quarryPriorityTier}
+【思考】${finalTag}`;
+    recordTrace(`超上級インフレAI (${cpu.name}) 決定: ${chosen.name} [Score:${bestCand.score}]
+${aiLog}`);
 
     applyActionEffect(cpu, chosen, true, () => {
       advanceTurn(G);
@@ -1237,9 +1324,25 @@ function cpuHandleWageSell(cpu) {
   const due = (cpu.workers + cpu.newWorkers) * WAGE_MAP[rnd];
   
   if (cpu.money < due) {
-    const sellables = ensureArray(cpu.buildings).filter(b => b && b.sellable !== false);
+    const allBlds = ensureArray(cpu.buildings);
+    const sellables = allBlds.filter(b => b && b.sellable !== false);
     if (sellables.length > 0) {
-      sellables.sort((a, b) => a.vp - b.vp);
+      const hasRealEstate = allBlds.some(b => b && b.id === 'real_estate');
+      const hasRailway = allBlds.some(b => b && b.id === 'railway');
+
+      // 売却時に失う実質VP損失 + 公共化による利敵度合いの合計が小さい建物から売却
+      const calcLiquidationCost = (b) => {
+        let lossVp = b.vp;
+        if (hasRealEstate) lossVp += 3;
+        if (hasRailway && b.tag === '工場') lossVp += 8;
+
+        let enemyBenefit = 0;
+        if (['auto_plant', 'steelworks', 'chem_factory'].includes(b.id)) enemyBenefit = 15;
+        else if (['niko_const', 'general_const', 'factory', 'orchard', 'plantation'].includes(b.id)) enemyBenefit = 6;
+        return lossVp + enemyBenefit;
+      };
+
+      sellables.sort((a, b) => calcLiquidationCost(a) - calcLiquidationCost(b));
       const target = sellables[0];
       cpu.buildings.splice(cpu.buildings.indexOf(target), 1);
       cpu.money += target.vp;
@@ -1258,7 +1361,7 @@ window.cpuHandleWageSell = cpuHandleWageSell;
 function cpuHandleHandDiscard(cpu) {
   const limit = getHandLimit(cpu);
   const excess = cpu.hand.length - limit;
-  cpu.hand.sort((a,b) => (a.isGoods ? 0 : a.vp) - (b.isGoods ? 0 : b.vp));
+  cpu.hand.sort((a, b) => getDiscardPriority(a, cpu, G.round) - getDiscardPriority(b, cpu, G.round));
   for (let i = 0; i < excess; i++) {
     const c = cpu.hand.shift();
     if (c && !c.isGoods) G.discard.push(c);
@@ -1293,7 +1396,8 @@ window.checkAndTriggerCpu = checkAndTriggerCpu;
 function convertPlayerToCpu(pIdx) {
   if (!currentRoomId || !db || !G.players[pIdx]) return;
   const p = G.players[pIdx];
-  if (!confirm(`「${p.name}」をCPUに切り替えますか？\n（離脱・切断時の代行操作を行います）`)) return;
+  if (!confirm(`「${p.name}」をCPUに切り替えますか？
+（離脱・切断時の代行操作を行います）`)) return;
 
   p.isHuman = false;
   p.name = `${p.name} (CPU)`;
@@ -1537,13 +1641,13 @@ function humanClickWorkplace(wpIdx, type) {
 
 function applyActionEffect(player, wp, isCpu, doneCb, cancelCb = null, aiLogInfo = "", preferredBuildUids = null) {
   const rnd = G.round, pName = player.name;
-  const aiPrefix = isCpu && aiLogInfo ? `${aiLogInfo}\n` : '';
+  const aiPrefix = isCpu && aiLogInfo ? `${aiLogInfo}
+` : '';
 
   const actualPlayer = G.players[player.id] || player;
   actualPlayer.hand = ensureArray(actualPlayer.hand);
   actualPlayer.buildings = ensureArray(actualPlayer.buildings);
 
-  // 一意UIDの完全保証
   actualPlayer.hand.forEach((c, idx) => {
     if (c && !c.uid) c.uid = `${c.id || 'card'}_${idx}_${Math.random().toString(36).substring(2, 7)}`;
   });
@@ -1612,13 +1716,24 @@ function applyActionEffect(player, wp, isCpu, doneCb, cancelCb = null, aiLogInfo
     G.logHistory.unshift(`[R${rnd}] 🏭 ${aiPrefix}➡ ${pName} が【${wp.name}】でカード${count}枚を獲得。`);
     doneCb();
   } else if (wp.id === 'office') {
-    const savedDeck = [...G.deck];
-    const savedDiscard = [...G.discard];
     const pool = [];
     for (let i = 0; i < 5; i++) pool.push(drawCardFromState(G));
 
     if (isCpu) {
-      pool.sort((a,b) => b.vp - a.vp);
+      const scoreOfficeCard = (c) => {
+        if (!c || c.isGoods) return -1;
+        let s = calcEffectiveVp(c, actualPlayer, rnd);
+        if (rnd <= 4) {
+          if (c.cost <= 2 && ENGINE_BUILDING_IDS.includes(c.id)) s += 16;
+          else if (c.cost <= 2 && ['const_co', 'cafe'].includes(c.id)) s += 12;
+          else if (c.cost >= 4) s -= 6;
+        } else {
+          if (['general_const', 'niko_const', 'auto_plant', 'steelworks', 'chem_factory'].includes(c.id)) s += 8;
+          if (actualPlayer.hand.length >= c.cost) s += 5;
+        }
+        return s;
+      };
+      pool.sort((a, b) => scoreOfficeCard(b) - scoreOfficeCard(a));
       const picked = pool.shift();
       actualPlayer.hand.push(picked);
       showCardsCutIn([picked], "設計事務所で獲得！", pName, actualPlayer.id, false);
@@ -1638,7 +1753,7 @@ function applyActionEffect(player, wp, isCpu, doneCb, cancelCb = null, aiLogInfo
   } else if (wp.id === 'factory' || wp.id === 'auto_plant') {
     const req = wp.id === 'factory' ? 2 : 3, gain = wp.id === 'factory' ? 4 : 7;
     if (isCpu) {
-      actualPlayer.hand.sort((a,b) => (a.isGoods ? 0 : a.vp) - (b.isGoods ? 0 : b.vp));
+      actualPlayer.hand.sort((a, b) => getDiscardPriority(a, actualPlayer, rnd) - getDiscardPriority(b, actualPlayer, rnd));
       for (let i = 0; i < req; i++) { const c = actualPlayer.hand.shift(); if (c && !c.isGoods) G.discard.push(c); }
       const drawn = [];
       for (let i = 0; i < gain; i++) drawn.push(drawCardFromState(G));
@@ -1668,7 +1783,7 @@ function applyActionEffect(player, wp, isCpu, doneCb, cancelCb = null, aiLogInfo
     }
 
     if (isCpu) {
-      actualPlayer.hand.sort((a,b) => (a.isGoods ? 0 : a.vp) - (b.isGoods ? 0 : b.vp));
+      actualPlayer.hand.sort((a, b) => getDiscardPriority(a, actualPlayer, rnd) - getDiscardPriority(b, actualPlayer, rnd));
       for (let i = 0; i < rate[0]; i++) { const c = actualPlayer.hand.shift(); if (c && !c.isGoods) G.discard.push(c); }
       G.household -= reqMoney; 
       actualPlayer.money += reqMoney;
@@ -1697,14 +1812,14 @@ function applyActionEffect(player, wp, isCpu, doneCb, cancelCb = null, aiLogInfo
       }
       if (!target) {
         let targetList = buildables;
-        if (rnd <= 3) {
-          const engines = buildables.filter(c => ['office', 'factory', 'auto_plant', 'steelworks', 'chem_factory', 'farm', 'plantation', 'orchard'].includes(c.id));
-          const nonPassive = buildables.filter(c => !['dormitory', 'warehouse', 'law_firm', 'real_estate', 'agr_coop', 'labor_union', 'headquarters', 'railway', 'mansion'].includes(c.id));
+        if (rnd <= 4) {
+          const engines = buildables.filter(c => ENGINE_BUILDING_IDS.includes(c.id));
+          const nonPassive = buildables.filter(c => !PASSIVE_BUILDING_IDS.includes(c.id));
           if (engines.length) {
             targetList = engines;
           } else if (nonPassive.length) {
             targetList = nonPassive;
-          } else if (rnd <= 2) {
+          } else {
             targetList = [];
           }
         }
@@ -1716,7 +1831,7 @@ function applyActionEffect(player, wp, isCpu, doneCb, cancelCb = null, aiLogInfo
           doneCb();
           return;
         }
-        targetList.sort((a,b) => b.vp - a.vp);
+        targetList.sort((a, b) => calcEffectiveVp(b, actualPlayer, rnd) - calcEffectiveVp(a, actualPlayer, rnd));
         target = targetList[0];
       }
       const cost = Math.max(0, target.cost - disc);
@@ -1724,7 +1839,7 @@ function applyActionEffect(player, wp, isCpu, doneCb, cancelCb = null, aiLogInfo
       const targetIdx = actualPlayer.hand.findIndex(c => c.uid === target.uid);
       if (targetIdx !== -1) actualPlayer.hand.splice(targetIdx, 1);
 
-      actualPlayer.hand.sort((a,b) => (a.isGoods ? 0 : a.vp) - (b.isGoods ? 0 : b.vp));
+      actualPlayer.hand.sort((a, b) => getDiscardPriority(a, actualPlayer, rnd) - getDiscardPriority(b, actualPlayer, rnd));
       for (let i = 0; i < cost; i++) {
         const c = actualPlayer.hand.shift();
         if (c && !c.isGoods) G.discard.push(c);
@@ -1820,14 +1935,14 @@ function applyActionEffect(player, wp, isCpu, doneCb, cancelCb = null, aiLogInfo
         const costKey = Object.keys(cg).find(c => cg[c] >= 2 && actualPlayer.hand.length >= 2 + parseInt(c, 10));
         if (!costKey) { doneCb(); return; }
         const costNum = parseInt(costKey, 10);
-        pair = builds.filter(c => c.cost === costNum).sort((a, b) => b.vp - a.vp).slice(0, 2);
+        pair = builds.filter(c => c.cost === costNum).sort((a, b) => calcEffectiveVp(b, actualPlayer, rnd) - calcEffectiveVp(a, actualPlayer, rnd)).slice(0, 2);
       }
       const costNum = pair[0].cost;
       pair.forEach(item => {
         const idx = actualPlayer.hand.findIndex(c => c.uid === item.uid);
         if (idx !== -1) actualPlayer.hand.splice(idx, 1);
       });
-      actualPlayer.hand.sort((a,b) => (a.isGoods ? 0 : a.vp) - (b.isGoods ? 0 : b.vp));
+      actualPlayer.hand.sort((a, b) => getDiscardPriority(a, actualPlayer, rnd) - getDiscardPriority(b, actualPlayer, rnd));
       for (let i = 0; i < costNum; i++) { const c = actualPlayer.hand.shift(); if (c && !c.isGoods) G.discard.push(c); }
       actualPlayer.buildings.push({ ...pair[0], ownerId: actualPlayer.id, capacity: 1, workers: [] }, { ...pair[1], ownerId: actualPlayer.id, capacity: 1, workers: [] });
       showCardsCutIn(pair, "二胡市建設で2軒同時建築！", pName, actualPlayer.id, true);
